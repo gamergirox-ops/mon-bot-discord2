@@ -75,10 +75,10 @@ client.on('messageCreate', async (message) => {
 module.exports = { client };
 
 const TOKEN = process.env.DISCORD_TOKEN;
-if (!TOKEN) {
+if (!TOKEN) 
   console.error('❌ DISCORD_TOKEN manquant dans le fichier .env');
   process.exit(1);
-}
+
 process.on('unhandledRejection'...)
 client.login(TOKEN);
 process.on('unhandledRejection', error => {
