@@ -16,7 +16,7 @@ const client = new Client({
 client.commands = new Collection();
 client.cooldowns = new Collection();
 
-// Load commands
+// Chargement des commandes
 const commandFiles = fs.readdirSync('./commands').filter(f => f.endsWith('.js'));
 for (const file of commandFiles) {
   const command = require(`./commands/${file}`);
@@ -27,10 +27,14 @@ client.once('ready', async () => {
   console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
   client.user.setActivity('🎮 Mini-Jeux | !aide', { type: ActivityType.Playing });
 
-  // Initial leaderboard update after 3s (let guilds load)
+  // Initialisation du classement après 3 secondes
   setTimeout(async () => {
-    for (const [, guild] of client.guilds.cache) {
-      await updateLeaderboard(client, guild.id);
+    try {
+      for (const [, guild] of client.guilds.cache) {
+        await updateLeaderboard(client, guild.id);
+      }
+    } catch (e) {
+      console.error("⚠️ Impossible de mettre à jour le classement au démarrage :", e.message);
     }
   }, 3000);
 });
@@ -45,7 +49,7 @@ client.on('messageCreate', async (message) => {
   const command = client.commands.get(commandName);
   if (!command) return;
 
-  // Cooldown
+  // Système de Cooldown
   if (!client.cooldowns.has(command.name)) {
     client.cooldowns.set(command.name, new Collection());
   }
@@ -57,7 +61,7 @@ client.on('messageCreate', async (message) => {
     const expiration = timestamps.get(message.author.id) + cooldownAmount;
     if (now < expiration) {
       const remaining = ((expiration - now) / 1000).toFixed(1);
-      return message.reply(`⏳ Attends encore **${remaining}s** avant de relancer \`!${command.name}\`.`);
+      return message.reply(`⏳ Attends encore **${remaining}s** avant de relancer \`!${command.name}\`.`).catch(() => null);
     }
   }
   timestamps.set(message.author.id, now);
@@ -67,19 +71,28 @@ client.on('messageCreate', async (message) => {
     await command.execute(message, args, client);
   } catch (err) {
     console.error(err);
-    message.reply('❌ Une erreur est survenue.');
+    message.reply('❌ Une erreur est survenue.').catch(() => null);
   }
 });
 
-
 module.exports = { client };
 
+// Connexion à Discord
 const TOKEN = process.env.DISCORD_TOKEN;
-if (!TOKEN) 
-  console.error('❌ DISCORD_TOKEN manquant dans le fichier .env');
+if (!TOKEN) {
+  console.error('❌ Connexion impossible : DISCORD_TOKEN vide.');
   process.exit(1);
+}
 
+client.login(TOKEN).catch(err => {
+  console.error('💥 Erreur lors du client.login (Token probablement invalide) :', err.message);
+});
 
+// --- SÉCURITÉS ANTI-CRASH GLOBALES ---
 process.on('unhandledRejection', (error) => {
-  console.error('Erreur bloquée (le bot continue de tourner) :', error.message);
+  console.error('⚠️ Erreur Discord API bloquée (unhandledRejection) :', error.message);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('💥 Crash système évité (uncaughtException) :', error.message);
 });
