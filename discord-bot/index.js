@@ -81,3 +81,6 @@ if (!TOKEN) {
 }
 process.on('unhandledRejection'...)
 client.login(TOKEN);
+process.on('unhandledRejection', error => {
+  console.error('Erreur attrapée (le bot continue de tourner) :', error);
+});
