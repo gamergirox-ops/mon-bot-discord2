@@ -71,7 +71,7 @@ client.on('messageCreate', async (message) => {
   }
 });
 
-// Export client for use in leaderboard updates
+
 module.exports = { client };
 
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -79,8 +79,7 @@ if (!TOKEN)
   console.error('❌ DISCORD_TOKEN manquant dans le fichier .env');
   process.exit(1);
 
-process.on('unhandledRejection'...)
-client.login(TOKEN);
-process.on('unhandledRejection', error => {
-  console.error('Erreur attrapée (le bot continue de tourner) :', error);
+
+process.on('unhandledRejection', (error) => {
+  console.error('Erreur bloquée (le bot continue de tourner) :', error.message);
 });
