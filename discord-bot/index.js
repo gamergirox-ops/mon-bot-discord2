@@ -79,4 +79,5 @@ if (!TOKEN) {
   console.error('❌ DISCORD_TOKEN manquant dans le fichier .env');
   process.exit(1);
 }
+process.on('unhandledRejection'...)
 client.login(TOKEN);
