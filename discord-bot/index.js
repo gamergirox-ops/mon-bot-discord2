@@ -19,7 +19,19 @@ const server = http.createServer((req, res) => {
 });
 const PORT = process.env.PORT || 10000;
 
-app.listen(PORT, '0.0.0.0', () => {
+// --- DEBUT DU FAUX SERVEUR POUR RENDER ---
+const express = require('express');
+const renderApp = express();
+const PORT = process.env.PORT || 10000;
+
+renderApp.get('/', (req, res) => {
+    res.send('Bot Discord en ligne et actif !');
+});
+
+renderApp.listen(PORT, '0.0.0.0', () => {
+    console.log(`Faux serveur web démarré sur le port ${PORT}`);
+});
+// --- FIN DU FAUX SERVEUR ---
     console.log(`Serveur actif sur le port ${PORT}`);
 });
 
