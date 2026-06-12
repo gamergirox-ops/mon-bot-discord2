@@ -1,7 +1,7 @@
 const { Client, GatewayIntentBits } = require('discord.js');
-const http = require('http');
+const express = require('express');
 
-// 1. Initialisation du client avec les intents nécessaires
+// 1. Initialisation du client Discord avec les intents nécessaires
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -12,34 +12,24 @@ const client = new Client({
 
 const PREFIX = "!"; 
 
-// 2. Lancement du "faux serveur" pour que Render ne coupe pas le bot
-const server = http.createServer((req, res) => {
-    res.writeHead(200);
-    res.end('Le bot est en ligne !');
-});
-const PORT = process.env.PORT || 10000;
-
-// --- DEBUT DU FAUX SERVEUR POUR RENDER ---
-const express = require('express');
+// 2. Lancement du serveur web pour Render (pour éviter que le bot ne coupe)
 const renderApp = express();
-const PORT = process.env.PORT || 10000;
+const RENDER_PORT = process.env.PORT || 10000;
 
 renderApp.get('/', (req, res) => {
     res.send('Bot Discord en ligne et actif !');
 });
 
-renderApp.listen(PORT, '0.0.0.0', () => {
-    console.log(`Faux serveur web démarré sur le port ${PORT}`);
-});
-// --- FIN DU FAUX SERVEUR ---
-    console.log(`Serveur actif sur le port ${PORT}`);
+renderApp.listen(RENDER_PORT, '0.0.0.0', () => {
+    console.log(`✅ Serveur web Render actif sur le port ${RENDER_PORT}`);
 });
 
+// 3. Événement quand le bot s'allume
 client.once('ready', () => {
     console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
 });
 
-// 3. Gestion des commandes avec le préfixe "!"
+// 4. Gestion des commandes avec le préfixe "!"
 client.on('messageCreate', (message) => {
     // Ne pas répondre aux autres bots ou aux messages sans préfixe
     if (message.author.bot || !message.content.startsWith(PREFIX)) return;
@@ -48,7 +38,7 @@ client.on('messageCreate', (message) => {
     const args = message.content.slice(PREFIX.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // Vos commandes ici
+    // Tes commandes
     if (command === 'ping') {
         message.reply('Pong ! 🏓');
     } 
