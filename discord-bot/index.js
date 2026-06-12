@@ -17,7 +17,11 @@ const server = http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Le bot est en ligne !');
 });
-server.listen(10000);
+const PORT = process.env.PORT || 10000;
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Serveur actif sur le port ${PORT}`);
+});
 
 client.once('ready', () => {
     console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
