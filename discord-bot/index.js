@@ -88,8 +88,6 @@ client.login(TOKEN);
 
 // leaderboard.js — Affiche et met à jour le classement en direct
 const { EmbedBuilder } = require('discord.js');
-const db = require('./database');
-
 const GAMES_INFO = {
   devinombre: { name: '🔢 Devine le Nombre', emoji: '🔢' },
   motmele:    { name: '🔤 Mot Mêlé',         emoji: '🔤' },
