@@ -1,54 +1,527 @@
-const { Client, GatewayIntentBits } = require('discord.js');
 const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get('/', (req, res) => res.send('Bot Discord en ligne !'));
+app.listen(PORT, () => console.log(`Serveur web prêt sur le port ${PORT}`));
+const { Client, GatewayIntentBits, Collection, ActivityType } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+const db = require('./database');
+const { updateLeaderboard } = require('./leaderboard');
 
-// 1. Initialisation du client Discord avec les intents nécessaires
 const client = new Client({
-    intents: [
-        GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
-    ]
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+  ],
 });
 
-const PREFIX = "!"; 
+client.commands = new Collection();
+client.cooldowns = new Collection();
 
-// 2. Lancement du serveur web pour Render (pour éviter que le bot ne coupe)
-const renderApp = express();
-const RENDER_PORT = process.env.PORT || 10000;
+// Load commands
+const commandFiles = fs.readdirSync('./commands').filter(f => f.endsWith('.js'));
+for (const file of commandFiles) {
+  const command = require(`./commands/${file}`);
+  client.commands.set(command.name, command);
+}
 
-renderApp.get('/', (req, res) => {
-    res.send('Bot Discord en ligne et actif !');
-});
+client.once('ready', async () => {
+  console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
+  client.user.setActivity('🎮 Mini-Jeux | !aide', { type: ActivityType.Playing });
 
-renderApp.listen(RENDER_PORT, '0.0.0.0', () => {
-    console.log(`✅ Serveur web Render actif sur le port ${RENDER_PORT}`);
-});
-
-// 3. Événement quand le bot s'allume
-client.once('ready', () => {
-    console.log(`✅ Bot connecté en tant que ${client.user.tag}`);
-});
-
-// 4. Gestion des commandes avec le préfixe "!"
-client.on('messageCreate', (message) => {
-    // Ne pas répondre aux autres bots ou aux messages sans préfixe
-    if (message.author.bot || !message.content.startsWith(PREFIX)) return;
-
-    // Sépare la commande des arguments
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-
-    // Tes commandes
-    if (command === 'ping') {
-        message.reply('Pong ! 🏓');
-    } 
-    else if (command === 'bonjour') {
-        message.reply(`Salut ${message.author.username} ! Comment ça va ?`);
+  // Initial leaderboard update after 3s (let guilds load)
+  setTimeout(async () => {
+    for (const [, guild] of client.guilds.cache) {
+      await updateLeaderboard(client, guild.id);
     }
-    else if (command === 'help') {
-        message.reply('Mes commandes sont : !ping, !bonjour, !help');
-    }
+  }, 3000);
 });
 
-// Connexion avec le jeton sécurisé
-client.login(process.env.DISCORD_TOKEN);
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  if (!message.content.startsWith('!')) return;
+
+  const args = message.content.slice(1).trim().split(/ +/);
+  const commandName = args.shift().toLowerCase();
+
+  const command = client.commands.get(commandName);
+  if (!command) return;
+
+  // Cooldown
+  if (!client.cooldowns.has(command.name)) {
+    client.cooldowns.set(command.name, new Collection());
+  }
+  const now = Date.now();
+  const timestamps = client.cooldowns.get(command.name);
+  const cooldownAmount = (command.cooldown || 3) * 1000;
+
+  if (timestamps.has(message.author.id)) {
+    const expiration = timestamps.get(message.author.id) + cooldownAmount;
+    if (now < expiration) {
+      const remaining = ((expiration - now) / 1000).toFixed(1);
+      return message.reply(`⏳ Attends encore **${remaining}s** avant de relancer \`!${command.name}\`.`);
+    }
+  }
+  timestamps.set(message.author.id, now);
+  setTimeout(() => timestamps.delete(message.author.id), cooldownAmount);
+
+  try {
+    await command.execute(message, args, client);
+  } catch (err) {
+    console.error(err);
+    message.reply('❌ Une erreur est survenue.');
+  }
+});
+
+// Export client for use in leaderboard updates
+module.exports = { client };
+
+const TOKEN = process.env.DISCORD_TOKEN;
+if (!TOKEN) {
+  console.error('❌ DISCORD_TOKEN manquant dans le fichier .env');
+  process.exit(1);
+}
+client.login(TOKEN);
+
+// leaderboard.js — Affiche et met à jour le classement en direct
+const { EmbedBuilder } = require('discord.js');
+const db = require('./database');
+
+const GAMES_INFO = {
+  devinombre: { name: '🔢 Devine le Nombre', emoji: '🔢' },
+  motmele:    { name: '🔤 Mot Mêlé',         emoji: '🔤' },
+  reaction:   { name: '⚡ Réaction Rapide',  emoji: '⚡' },
+  pierre:     { name: '✊ Pierre-Feuille-Ciseaux', emoji: '✊' },
+  math:       { name: '🧮 Calcul Mental',    emoji: '🧮' },
+  trivia:     { name: '❓ Trivia',            emoji: '❓' },
+};
+
+function buildLeaderboardEmbed() {
+  const embed = new EmbedBuilder()
+    .setTitle('🏆 Classement des Mini-Jeux')
+    .setColor(0xFFD700)
+    .setFooter({ text: `Mis à jour le ${new Date().toLocaleString('fr-FR')}` })
+    .setTimestamp();
+
+  const games = db.getAllGames();
+
+  if (games.length === 0) {
+    embed.setDescription('Aucune partie jouée encore ! Lance un mini-jeu avec `!aide`.');
+    return embed;
+  }
+
+  for (const gameKey of games) {
+    const info = GAMES_INFO[gameKey] || { name: gameKey, emoji: '🎮' };
+    const top = db.getTop5(gameKey);
+
+    if (top.length === 0) continue;
+
+    const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+    const lines = top.map((p, i) =>
+      `${medals[i]} **${escapeMarkdown(p.username)}** — ${p.wins} victoire${p.wins > 1 ? 's' : ''}`
+    );
+
+    embed.addFields({
+      name: info.name,
+      value: lines.join('\n'),
+      inline: true,
+    });
+  }
+
+  return embed;
+}
+
+function escapeMarkdown(text) {
+  return text.replace(/[_*~`|]/g, '\\$&');
+}
+
+async function updateLeaderboard(client, guildId) {
+  const info = db.getLeaderboardChannel(guildId);
+  if (!info) return;
+
+  try {
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+
+    const channel = await guild.channels.fetch(info.channelId).catch(() => null);
+    if (!channel) return;
+
+    const embed = buildLeaderboardEmbed();
+
+    if (info.messageId) {
+      // Essaie de modifier le message existant
+      const msg = await channel.messages.fetch(info.messageId).catch(() => null);
+      if (msg) {
+        await msg.edit({ embeds: [embed] });
+        return;
+      }
+    }
+
+    // Crée un nouveau message si aucun n'existe
+    const sent = await channel.send({ embeds: [embed] });
+    db.setLeaderboardChannel(guildId, info.channelId, sent.id);
+  } catch (err) {
+    console.error('Erreur update leaderboard:', err.message);
+  }
+}
+
+module.exports = { updateLeaderboard, buildLeaderboardEmbed };
+
+{
+  "name": "discord-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.26.4",
+    "dotenv": "^17.4.2"
+  }
+}
+
+{
+  "name": "discord-bot",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "discord-bot",
+      "version": "1.0.0",
+      "license": "ISC",
+      "dependencies": {
+        "discord.js": "^14.26.4",
+        "dotenv": "^17.4.2"
+      }
+    },
+    "node_modules/@discordjs/builders": {
+      "version": "1.14.1",
+      "resolved": "https://registry.npmjs.org/@discordjs/builders/-/builders-1.14.1.tgz",
+      "integrity": "sha512-gSKkhXLqs96TCzk66VZuHHl8z2bQMJFGwrXC0f33ngK+FLNau4hU1PYny3DNJfNdSH+gVMzE85/d5FQ2BpcNwQ==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "@discordjs/formatters": "^0.6.2",
+        "@discordjs/util": "^1.2.0",
+        "@sapphire/shapeshift": "^4.0.0",
+        "discord-api-types": "^0.38.40",
+        "fast-deep-equal": "^3.1.3",
+        "ts-mixer": "^6.0.4",
+        "tslib": "^2.6.3"
+      },
+      "engines": {
+        "node": ">=16.11.0"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@discordjs/collection": {
+      "version": "1.5.3",
+      "resolved": "https://registry.npmjs.org/@discordjs/collection/-/collection-1.5.3.tgz",
+      "integrity": "sha512-SVb428OMd3WO1paV3rm6tSjM4wC+Kecaa1EUGX7vc6/fddvw/6lg90z4QtCqm21zvVe92vMMDt9+DkIvjXImQQ==",
+      "license": "Apache-2.0",
+      "engines": {
+        "node": ">=16.11.0"
+      }
+    },
+    "node_modules/@discordjs/formatters": {
+      "version": "0.6.2",
+      "resolved": "https://registry.npmjs.org/@discordjs/formatters/-/formatters-0.6.2.tgz",
+      "integrity": "sha512-y4UPwWhH6vChKRkGdMB4odasUbHOUwy7KL+OVwF86PvT6QVOwElx+TiI1/6kcmcEe+g5YRXJFiXSXUdabqZOvQ==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "discord-api-types": "^0.38.33"
+      },
+      "engines": {
+        "node": ">=16.11.0"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@discordjs/rest": {
+      "version": "2.6.1",
+      "resolved": "https://registry.npmjs.org/@discordjs/rest/-/rest-2.6.1.tgz",
+      "integrity": "sha512-wwQdgjeaoYFiaG+atbqx6aJDpqW7JHAo0HrQkBTbYzM3/PJ3GweQIpgElNcGZ26DCUOXMyawYd0YF7vtr+fZXg==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "@discordjs/collection": "^2.1.1",
+        "@discordjs/util": "^1.2.0",
+        "@sapphire/async-queue": "^1.5.3",
+        "@sapphire/snowflake": "^3.5.5",
+        "@vladfrangu/async_event_emitter": "^2.4.6",
+        "discord-api-types": "^0.38.40",
+        "magic-bytes.js": "^1.13.0",
+        "tslib": "^2.6.3",
+        "undici": "6.24.1"
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@discordjs/rest/node_modules/@discordjs/collection": {
+      "version": "2.1.1",
+      "resolved": "https://registry.npmjs.org/@discordjs/collection/-/collection-2.1.1.tgz",
+      "integrity": "sha512-LiSusze9Tc7qF03sLCujF5iZp7K+vRNEDBZ86FT9aQAv3vxMLihUvKvpsCWiQ2DJq1tVckopKm1rxomgNUc9hg==",
+      "license": "Apache-2.0",
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@discordjs/rest/node_modules/@sapphire/snowflake": {
+      "version": "3.5.5",
+      "resolved": "https://registry.npmjs.org/@sapphire/snowflake/-/snowflake-3.5.5.tgz",
+      "integrity": "sha512-xzvBr1Q1c4lCe7i6sRnrofxeO1QTP/LKQ6A6qy0iB4x5yfiSfARMEQEghojzTNALDTcv8En04qYNIco9/K9eZQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=v14.0.0",
+        "npm": ">=7.0.0"
+      }
+    },
+    "node_modules/@discordjs/util": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/@discordjs/util/-/util-1.2.0.tgz",
+      "integrity": "sha512-3LKP7F2+atl9vJFhaBjn4nOaSWahZ/yWjOvA4e5pnXkt2qyXRCHLxoBQy81GFtLGCq7K9lPm9R517M1U+/90Qg==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "discord-api-types": "^0.38.33"
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@discordjs/ws": {
+      "version": "1.2.3",
+      "resolved": "https://registry.npmjs.org/@discordjs/ws/-/ws-1.2.3.tgz",
+      "integrity": "sha512-wPlQDxEmlDg5IxhJPuxXr3Vy9AjYq5xCvFWGJyD7w7Np8ZGu+Mc+97LCoEc/+AYCo2IDpKioiH0/c/mj5ZR9Uw==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "@discordjs/collection": "^2.1.0",
+        "@discordjs/rest": "^2.5.1",
+        "@discordjs/util": "^1.1.0",
+        "@sapphire/async-queue": "^1.5.2",
+        "@types/ws": "^8.5.10",
+        "@vladfrangu/async_event_emitter": "^2.2.4",
+        "discord-api-types": "^0.38.1",
+        "tslib": "^2.6.2",
+        "ws": "^8.17.0"
+      },
+      "engines": {
+        "node": ">=16.11.0"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@discordjs/ws/node_modules/@discordjs/collection": {
+      "version": "2.1.1",
+      "resolved": "https://registry.npmjs.org/@discordjs/collection/-/collection-2.1.1.tgz",
+      "integrity": "sha512-LiSusze9Tc7qF03sLCujF5iZp7K+vRNEDBZ86FT9aQAv3vxMLihUvKvpsCWiQ2DJq1tVckopKm1rxomgNUc9hg==",
+      "license": "Apache-2.0",
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/@sapphire/async-queue": {
+      "version": "1.5.5",
+      "resolved": "https://registry.npmjs.org/@sapphire/async-queue/-/async-queue-1.5.5.tgz",
+      "integrity": "sha512-cvGzxbba6sav2zZkH8GPf2oGk9yYoD5qrNWdu9fRehifgnFZJMV+nuy2nON2roRO4yQQ+v7MK/Pktl/HgfsUXg==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=v14.0.0",
+        "npm": ">=7.0.0"
+      }
+    },
+    "node_modules/@sapphire/shapeshift": {
+      "version": "4.0.0",
+      "resolved": "https://registry.npmjs.org/@sapphire/shapeshift/-/shapeshift-4.0.0.tgz",
+      "integrity": "sha512-d9dUmWVA7MMiKobL3VpLF8P2aeanRTu6ypG2OIaEv/ZHH/SUQ2iHOVyi5wAPjQ+HmnMuL0whK9ez8I/raWbtIg==",
+      "license": "MIT",
+      "dependencies": {
+        "fast-deep-equal": "^3.1.3",
+        "lodash": "^4.17.21"
+      },
+      "engines": {
+        "node": ">=v16"
+      }
+    },
+    "node_modules/@sapphire/snowflake": {
+      "version": "3.5.3",
+      "resolved": "https://registry.npmjs.org/@sapphire/snowflake/-/snowflake-3.5.3.tgz",
+      "integrity": "sha512-jjmJywLAFoWeBi1W7994zZyiNWPIiqRRNAmSERxyg93xRGzNYvGjlZ0gR6x0F4gPRi2+0O6S71kOZYyr3cxaIQ==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=v14.0.0",
+        "npm": ">=7.0.0"
+      }
+    },
+    "node_modules/@types/node": {
+      "version": "25.9.2",
+      "resolved": "https://registry.npmjs.org/@types/node/-/node-25.9.2.tgz",
+      "integrity": "sha512-G05zqtJhcDLb8uslf5EjCxXg9G1KQxiV8OS0R26IC//Eoyitzqe8z37I7cqvnZlrlSfgocQRfSn/AHBZJJFyGw==",
+      "license": "MIT",
+      "dependencies": {
+        "undici-types": ">=7.24.0 <7.24.7"
+      }
+    },
+    "node_modules/@types/ws": {
+      "version": "8.18.1",
+      "resolved": "https://registry.npmjs.org/@types/ws/-/ws-8.18.1.tgz",
+      "integrity": "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==",
+      "license": "MIT",
+      "dependencies": {
+        "@types/node": "*"
+      }
+    },
+    "node_modules/@vladfrangu/async_event_emitter": {
+      "version": "2.4.7",
+      "resolved": "https://registry.npmjs.org/@vladfrangu/async_event_emitter/-/async_event_emitter-2.4.7.tgz",
+      "integrity": "sha512-Xfe6rpCTxSxfbswi/W/Pz7zp1WWSNn4A0eW4mLkQUewCrXXtMj31lCg+iQyTkh/CkusZSq9eDflu7tjEDXUY6g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=v14.0.0",
+        "npm": ">=7.0.0"
+      }
+    },
+    "node_modules/discord-api-types": {
+      "version": "0.38.48",
+      "resolved": "https://registry.npmjs.org/discord-api-types/-/discord-api-types-0.38.48.tgz",
+      "integrity": "sha512-WFUE/2o0lBlLeCQonQ+Pu2RqHAqbytBJ2RlXR91gzk05InSS6k9ShzzLYoymrA4c2oRgRKGE7/VqQJNNdGWSxQ==",
+      "license": "MIT",
+      "workspaces": [
+        "scripts/actions/documentation"
+      ]
+    },
+    "node_modules/discord.js": {
+      "version": "14.26.4",
+      "resolved": "https://registry.npmjs.org/discord.js/-/discord.js-14.26.4.tgz",
+      "integrity": "sha512-4oBp8tc6Kf8IDBwAHhbsMaAqx1b5fob9SNasZT7V6yyyUydoO5i5fGuX7TmvRtR+q/WgKRnRViRoAWnG7fNyvA==",
+      "license": "Apache-2.0",
+      "dependencies": {
+        "@discordjs/builders": "^1.14.1",
+        "@discordjs/collection": "1.5.3",
+        "@discordjs/formatters": "^0.6.2",
+        "@discordjs/rest": "^2.6.1",
+        "@discordjs/util": "^1.2.0",
+        "@discordjs/ws": "^1.2.3",
+        "@sapphire/snowflake": "3.5.3",
+        "discord-api-types": "^0.38.40",
+        "fast-deep-equal": "3.1.3",
+        "lodash.snakecase": "4.1.1",
+        "magic-bytes.js": "^1.13.0",
+        "tslib": "^2.6.3",
+        "undici": "6.24.1"
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "funding": {
+        "url": "https://github.com/discordjs/discord.js?sponsor"
+      }
+    },
+    "node_modules/dotenv": {
+      "version": "17.4.2",
+      "resolved": "https://registry.npmjs.org/dotenv/-/dotenv-17.4.2.tgz",
+      "integrity": "sha512-nI4U3TottKAcAD9LLud4Cb7b2QztQMUEfHbvhTH09bqXTxnSie8WnjPALV/WMCrJZ6UV/qHJ6L03OqO3LcdYZw==",
+      "license": "BSD-2-Clause",
+      "engines": {
+        "node": ">=12"
+      },
+      "funding": {
+        "url": "https://dotenvx.com"
+      }
+    },
+    "node_modules/fast-deep-equal": {
+      "version": "3.1.3",
+      "resolved": "https://registry.npmjs.org/fast-deep-equal/-/fast-deep-equal-3.1.3.tgz",
+      "integrity": "sha512-f3qQ9oQy9j2AhBe/H9VC91wLmKBCCU/gDOnKNAYG5hswO7BLKj09Hc5HYNz9cGI++xlpDCIgDaitVs03ATR84Q==",
+      "license": "MIT"
+    },
+    "node_modules/lodash": {
+      "version": "4.18.1",
+      "resolved": "https://registry.npmjs.org/lodash/-/lodash-4.18.1.tgz",
+      "integrity": "sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==",
+      "license": "MIT"
+    },
+    "node_modules/lodash.snakecase": {
+      "version": "4.1.1",
+      "resolved": "https://registry.npmjs.org/lodash.snakecase/-/lodash.snakecase-4.1.1.tgz",
+      "integrity": "sha512-QZ1d4xoBHYUeuouhEq3lk3Uq7ldgyFXGBhg04+oRLnIz8o9T65Eh+8YdroUwn846zchkA9yDsDl5CVVaV2nqYw==",
+      "license": "MIT"
+    },
+    "node_modules/magic-bytes.js": {
+      "version": "1.13.0",
+      "resolved": "https://registry.npmjs.org/magic-bytes.js/-/magic-bytes.js-1.13.0.tgz",
+      "integrity": "sha512-afO2mnxW7GDTXMm5/AoN1WuOcdoKhtgXjIvHmobqTD1grNplhGdv3PFOyjCVmrnOZBIT/gD/koDKpYG+0mvHcg==",
+      "license": "MIT"
+    },
+    "node_modules/ts-mixer": {
+      "version": "6.0.4",
+      "resolved": "https://registry.npmjs.org/ts-mixer/-/ts-mixer-6.0.4.tgz",
+      "integrity": "sha512-ufKpbmrugz5Aou4wcr5Wc1UUFWOLhq+Fm6qa6P0w0K5Qw2yhaUoiWszhCVuNQyNwrlGiscHOmqYoAox1PtvgjA==",
+      "license": "MIT"
+    },
+    "node_modules/tslib": {
+      "version": "2.8.1",
+      "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.8.1.tgz",
+      "integrity": "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==",
+      "license": "0BSD"
+    },
+    "node_modules/undici": {
+      "version": "6.24.1",
+      "resolved": "https://registry.npmjs.org/undici/-/undici-6.24.1.tgz",
+      "integrity": "sha512-sC+b0tB1whOCzbtlx20fx3WgCXwkW627p4EA9uM+/tNNPkSS+eSEld6pAs9nDv7WbY1UUljBMYPtu9BCOrCWKA==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=18.17"
+      }
+    },
+    "node_modules/undici-types": {
+      "version": "7.24.6",
+      "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-7.24.6.tgz",
+      "integrity": "sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==",
+      "license": "MIT"
+    },
+    "node_modules/ws": {
+      "version": "8.21.0",
+      "resolved": "https://registry.npmjs.org/ws/-/ws-8.21.0.tgz",
+      "integrity": "sha512-Vsp28b7DRcimFQvrqu2Wek3z1iYxDCWqHYB8Qsnk/S4RfaCQzPGPyBNuVjJV3cd6UiKtUtp6sNM77gWvzcCH+g==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=10.0.0"
+      },
+      "peerDependencies": {
+        "bufferutil": "^4.0.1",
+        "utf-8-validate": ">=5.0.2"
+      },
+      "peerDependenciesMeta": {
+        "bufferutil": {
+          "optional": true
+        },
+        "utf-8-validate": {
+          "optional": true
+        }
+      }
+    }
+  }
+}
